@@ -10,7 +10,7 @@
 #include "txn/lock_manager.h"
 
 // Thread & queue counts for StaticThreadPool initialization.
-#define THREAD_COUNT 8
+#define THREAD_COUNT 4
 
 TxnProcessor::TxnProcessor(CCMode mode)
     : mode_(mode), tp_(THREAD_COUNT), next_unique_id_(1) {
@@ -36,10 +36,6 @@ TxnProcessor::TxnProcessor(CCMode mode)
   CPU_SET(0, &cpuset);
   CPU_SET(1, &cpuset);
   CPU_SET(2, &cpuset);
-  CPU_SET(3, &cpuset);
-  CPU_SET(4, &cpuset);
-  CPU_SET(5, &cpuset);
-  CPU_SET(6, &cpuset);
   pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpuset);
   pthread_t scheduler_;
   pthread_create(&scheduler_, &attr, StartScheduler, reinterpret_cast<void*>(this));
@@ -296,27 +292,30 @@ void TxnProcessor::RunOCCScheduler() {
     while (completed_txns_.Pop(&finished)) {
       if (finished->Status() == COMPLETED_A) {
         finished->status_ = ABORTED;
-      } else {
+        txn_results_.Push(finished);
+      } else if (finished->Status() == COMPLETED_C) {
         bool valid = OCCValidateTransaction(*finished);
         if (!valid) {
           // Cleanup and restart
-          finished->reads_.empty();
-          finished->writes_.empty();
+          finished->reads_.clear();
+          finished->writes_.clear();
           finished->status_ = INCOMPLETE;
 
           mutex_.Lock();
-          txn->unique_id_ = next_unique_id_;
+          finished->unique_id_ = next_unique_id_;
           next_unique_id_++;
           txn_requests_.Push(finished);
           mutex_.Unlock();
         } else {
           // Commit the transaction
           ApplyWrites(finished);
-          txn->status_ = COMMITTED;
+          finished->status_ = COMMITTED;
+          txn_results_.Push(finished);
         }
+      } else {
+        DIE("Completed Txn has invalid status: " << finished->Status());
       }
 
-      txn_results_.Push(finished);
     }
   }
 }
